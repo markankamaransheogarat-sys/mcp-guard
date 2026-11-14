@@ -1,0 +1,38 @@
+[package]
+name = "mcp-guard"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Local security firewall and capability sandbox (Little Snitch + WAF) for Model Context Protocol (MCP) servers"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/markankamaransheogarat-sys/mcp-guard"
+homepage = "https://github.com/markankamaransheogarat-sys/mcp-guard"
+keywords = ["mcp", "security", "firewall", "sandbox", "llm"]
+categories = ["command-line-utilities", "network-programming", "web-programming"]
+
+[dependencies]
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+futures-util = "0.3"
+globset = "0.4"
+ipnet = "2"
+owo-colors = "4"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "net", "sync", "time", "fs", "signal"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

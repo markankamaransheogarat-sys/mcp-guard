@@ -1,0 +1,33 @@
+server = "workspace"
+
+[tools]
+allow = ["read_file", "read_multiple_files", "list_directory", "search_files", "fetch_docs"]
+deny = ["execute_command", "run_shell", "delete_file"]
+
+[paths]
+allowed_dirs = ["./"]
+denied_patterns = ["**/*.pem", "**/*.key", "**/secrets/**"]
+deny_default_sensitive = true
+allow_symlink_escape = false
+
+[network]
+allowed_domains = ["api.github.com", "*.docs.rs"]
+denied_domains = []
+block_private_ips = true
+
+[rate_limit]
+max_calls_per_minute = 120
+loop_breaker_threshold = 5
+loop_window_secs = 60
+
+[sanitizer]
+redact_secrets = true
+detect_high_entropy = true
+entropy_threshold = 4.5
+prompt_injection_mode = "tag" # "tag" | "block" | "off"
+
+[audit]
+enabled = true
+path = "mcp-guard-audit.jsonl"
+max_file_bytes = 10485760
+max_rotated_files = 5
