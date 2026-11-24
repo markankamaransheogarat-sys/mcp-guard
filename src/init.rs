@@ -45,6 +45,7 @@ pub fn generate_policy_from_json(path: Option<&Path>) -> Result<(PolicyConfig, V
                 "run_shell".into(),
                 "delete_file".into(),
             ],
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -72,6 +73,7 @@ pub fn generate_policy_from_json(path: Option<&Path>) -> Result<(PolicyConfig, V
                             "get_file_info".into(),
                         ],
                         deny: vec!["write_file".into(), "delete_file".into()],
+                        ..Default::default()
                     });
                 }
                 if let Some(args) = def.get("args").and_then(Value::as_array) {

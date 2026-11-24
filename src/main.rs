@@ -66,6 +66,15 @@ enum Commands {
         #[arg(long, short, default_value = "default")]
         server: String,
     },
+    /// Validate a policy file (TOML syntax, globs, regexes, and allowed_dirs)
+    Check {
+        /// Path to mcp-guard.toml policy file
+        #[arg(long, short, default_value = "mcp-guard.toml")]
+        policy: PathBuf,
+        /// Optional logical server name to validate effective [servers.<name>] override
+        #[arg(long, short)]
+        server: Option<String>,
+    },
     /// Inspect recent audit log entries
     Audit {
         /// Path to audit JSONL file (defaults to platform local data dir or policy setting)
@@ -125,6 +134,37 @@ async fn run(cli: Cli) -> Result<i32> {
             let cfg = load_or_default(&policy)?.for_server(&server);
             let ctx = GuardContext::new(&cfg)?;
             run_http_proxy(ctx, bind, upstream).await?;
+            Ok(0)
+        }
+        Commands::Check { policy, server } => {
+            let base = PolicyConfig::from_file(&policy)?;
+            let effective = match server.as_deref() {
+                Some(name) => base.for_server(name),
+                None => base,
+            };
+            let _ctx = GuardContext::new(&effective)?;
+            let missing_dirs: Vec<_> = effective
+                .paths
+                .allowed_dirs
+                .iter()
+                .filter(|d| !d.exists())
+                .collect();
+            for dir in &missing_dirs {
+                eprintln!(
+                    "warning: allowed_dirs path does not exist: {}",
+                    dir.display()
+                );
+            }
+            println!(
+                "OK: {} valid (server='{}', allowed_dirs={}, tools.allow={}, tools.deny={}, block_private_ips={}, resolve_dns={})",
+                policy.display(),
+                effective.server,
+                effective.paths.allowed_dirs.len(),
+                effective.tools.allow.len(),
+                effective.tools.deny.len(),
+                effective.network.block_private_ips,
+                effective.network.resolve_dns,
+            );
             Ok(0)
         }
         Commands::Audit { log, tail } => {

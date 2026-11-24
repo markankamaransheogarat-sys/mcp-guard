@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 
 use ipnet::IpNet;
 use url::Url;
@@ -12,6 +12,7 @@ pub struct NetworkValidator {
     allowed_domains: Vec<String>,
     denied_domains: Vec<String>,
     block_private_ips: bool,
+    resolve_dns: bool,
     private_nets: Vec<IpNet>,
 }
 
@@ -26,9 +27,12 @@ impl NetworkValidator {
             "169.254.0.0/16",
             "0.0.0.0/8",
             "100.64.0.0/10",
+            "224.0.0.0/4",
+            "::/128",
             "::1/128",
             "fc00::/7",
             "fe80::/10",
+            "ff00::/8",
         ];
         let private_nets = private_cidrs
             .iter()
@@ -47,6 +51,7 @@ impl NetworkValidator {
                 .map(|d| d.to_ascii_lowercase())
                 .collect(),
             block_private_ips: policy.block_private_ips,
+            resolve_dns: policy.resolve_dns,
             private_nets,
         }
     }
@@ -79,6 +84,18 @@ impl NetworkValidator {
                     return Err(GuardError::PolicyDenied(format!(
                         "SSRF protection blocked private/metadata IP '{ip}'"
                     )));
+                }
+            } else if self.resolve_dns {
+                let port = parsed.port_or_known_default().unwrap_or(80);
+                if let Ok(addrs) = (host_lower.as_str(), port).to_socket_addrs() {
+                    for addr in addrs {
+                        if self.is_private_ip(addr.ip()) {
+                            return Err(GuardError::PolicyDenied(format!(
+                                "SSRF protection blocked '{host_lower}' resolving to private IP '{}'",
+                                addr.ip()
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -113,7 +130,10 @@ impl NetworkValidator {
                 return self.is_private_ip(IpAddr::V4(v4));
             }
         }
-        self.private_nets.iter().any(|net| net.contains(&ip))
+        ip.is_loopback()
+            || ip.is_unspecified()
+            || ip.is_multicast()
+            || self.private_nets.iter().any(|net| net.contains(&ip))
     }
 }
 
@@ -143,6 +163,7 @@ mod tests {
             allowed_domains: vec!["api.github.com".into(), "*.docs.rs".into()],
             denied_domains: vec!["evil.docs.rs".into()],
             block_private_ips: true,
+            ..Default::default()
         };
         let v = NetworkValidator::new(&policy);
 

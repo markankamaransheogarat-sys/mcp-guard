@@ -26,6 +26,7 @@ pub struct PolicyEngine {
     server_name: String,
     allow_tools: Option<GlobSet>,
     deny_tools: GlobSet,
+    filter_tools_list: bool,
     path_validator: PathValidator,
     network_validator: NetworkValidator,
     rate_limiter: RateLimiter,
@@ -54,6 +55,7 @@ impl PolicyEngine {
             server_name: config.server.clone(),
             allow_tools,
             deny_tools,
+            filter_tools_list: config.tools.filter_tools_list,
             path_validator: PathValidator::new(&config.paths)?,
             network_validator: NetworkValidator::new(&config.network),
             rate_limiter: RateLimiter::new(config.rate_limit.clone()),
@@ -63,6 +65,44 @@ impl PolicyEngine {
     /// Logical server name associated with this engine.
     pub fn server_name(&self) -> &str {
         &self.server_name
+    }
+
+    /// Check whether a tool name is permitted by `tools.deny` and `tools.allow`.
+    pub fn check_tool_name(&self, tool: &str) -> std::result::Result<(), String> {
+        if self.deny_tools.is_match(tool) {
+            return Err(format!("tool '{tool}' is denied by policy"));
+        }
+        if let Some(allow) = &self.allow_tools {
+            if !allow.is_match(tool) {
+                return Err(format!("tool '{tool}' is not in tools.allow"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove disallowed tools from a `tools/list` JSON-RPC response in place.
+    /// Returns the number of hidden tools.
+    pub fn filter_tools_list_response(&self, msg: &mut JsonRpcMessage) -> usize {
+        if !self.filter_tools_list {
+            return 0;
+        }
+        let Some(tools) = msg
+            .result
+            .as_mut()
+            .and_then(|r| r.get_mut("tools"))
+            .and_then(Value::as_array_mut)
+        else {
+            return 0;
+        };
+        let before = tools.len();
+        tools.retain(|entry| {
+            entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(|name| self.check_tool_name(name).is_ok())
+                .unwrap_or(true)
+        });
+        before - tools.len()
     }
 
     /// Evaluate an incoming JSON-RPC message from the client.
@@ -83,14 +123,8 @@ impl PolicyEngine {
             return Decision::Deny("missing tool name in tools/call".to_string());
         };
 
-        if self.deny_tools.is_match(tool) {
-            return Decision::Deny(format!("tool '{tool}' is denied by policy"));
-        }
-
-        if let Some(allow) = &self.allow_tools {
-            if !allow.is_match(tool) {
-                return Decision::Deny(format!("tool '{tool}' is not in tools.allow"));
-            }
+        if let Err(reason) = self.check_tool_name(tool) {
+            return Decision::Deny(reason);
         }
 
         let args = msg.tool_arguments();
@@ -236,6 +270,7 @@ mod tests {
             tools: ToolPolicy {
                 allow: vec!["read_*".into()],
                 deny: vec!["read_secret".into()],
+                ..Default::default()
             },
             ..Default::default()
         };

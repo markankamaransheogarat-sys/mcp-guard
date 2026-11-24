@@ -90,13 +90,30 @@ pub struct ServerOverride {
 }
 
 /// Tool allowlist and denylist rules.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolPolicy {
     /// If non-empty, only tools matching this list are allowed.
     pub allow: Vec<String>,
     /// Tools explicitly denied (takes precedence over `allow`).
     pub deny: Vec<String>,
+    /// Filter denied / non-allowlisted tools out of `tools/list` server responses.
+    #[serde(default = "default_true")]
+    pub filter_tools_list: bool,
+}
+
+impl Default for ToolPolicy {
+    fn default() -> Self {
+        Self {
+            allow: Vec::new(),
+            deny: Vec::new(),
+            filter_tools_list: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Filesystem path-jail and sensitive path rules.
@@ -134,6 +151,8 @@ pub struct NetworkPolicy {
     pub denied_domains: Vec<String>,
     /// Block loopback, private RFC1918, link-local, and cloud metadata IPs.
     pub block_private_ips: bool,
+    /// Resolve domain names via DNS and block if any resolved IP is private/metadata.
+    pub resolve_dns: bool,
 }
 
 impl Default for NetworkPolicy {
@@ -142,6 +161,7 @@ impl Default for NetworkPolicy {
             allowed_domains: Vec::new(),
             denied_domains: Vec::new(),
             block_private_ips: true,
+            resolve_dns: false,
         }
     }
 }

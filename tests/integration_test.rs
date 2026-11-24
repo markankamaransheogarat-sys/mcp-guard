@@ -139,6 +139,7 @@ async fn stdio_proxy_enforces_policy_redacts_secrets_and_logs_audit() {
                 "fetch_url".into(),
             ],
             deny: vec!["execute_command".into()],
+            ..Default::default()
         },
         paths: PathPolicy {
             allowed_dirs: vec![workspace.path().to_path_buf()],
@@ -460,6 +461,7 @@ async fn http_sse_proxy_blocks_denied_and_sanitizes_sse() {
         tools: ToolPolicy {
             allow: vec!["safe_tool".into()],
             deny: vec!["dangerous_tool".into()],
+            ..Default::default()
         },
         audit: AuditPolicy {
             enabled: false,
@@ -547,4 +549,161 @@ fn cli_init_and_audit_commands_work() {
         .status()
         .unwrap();
     assert!(audit_status.success());
+}
+
+#[test]
+fn batch_request_denies_entire_batch_if_any_item_violates_policy() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = PolicyConfig::default();
+    cfg.audit.path = dir.path().join("audit.jsonl");
+    cfg.tools.deny = vec!["bash*".into()];
+    let ctx = GuardContext::new(&cfg).unwrap();
+
+    let batch = serde_json::json!([
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "read_file", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bash_exec", "arguments": {"cmd": "id"}}}
+    ]);
+    match ctx.process_client_line(&batch.to_string()) {
+        mcp_guard::proxy::ClientAction::ImmediateReply(reply) => {
+            let parsed: Vec<Value> = serde_json::from_str(&reply).unwrap();
+            assert_eq!(parsed.len(), 2);
+            assert_eq!(parsed[0]["error"]["code"], -32001);
+            assert_eq!(parsed[1]["error"]["code"], -32001);
+        }
+        mcp_guard::proxy::ClientAction::Forward(_) => {
+            panic!("expected batch containing denied tool to be blocked")
+        }
+    }
+}
+
+#[test]
+fn tools_list_response_filters_denied_tools() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = PolicyConfig::default();
+    cfg.audit.path = dir.path().join("audit.jsonl");
+    cfg.tools.allow = vec!["read_*".into()];
+    cfg.tools.deny = vec!["read_secret".into()];
+    let ctx = GuardContext::new(&cfg).unwrap();
+
+    let req = r#"{"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}"#;
+    assert!(matches!(
+        ctx.process_client_line(req),
+        mcp_guard::proxy::ClientAction::Forward(_)
+    ));
+
+    let resp = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "result": {
+            "tools": [
+                {"name": "read_file", "description": "Read a file"},
+                {"name": "read_secret", "description": "Forbidden"},
+                {"name": "write_file", "description": "Write a file"}
+            ]
+        }
+    });
+    let filtered = ctx.process_server_line(&resp.to_string());
+    let parsed: Value = serde_json::from_str(&filtered).unwrap();
+    let tools = parsed["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "read_file");
+}
+
+#[test]
+fn network_validator_blocks_ipv6_multicast_and_unspecified() {
+    let cfg = PolicyConfig::default();
+    let engine = mcp_guard::policy::PolicyEngine::new(&cfg).unwrap();
+
+    for uri in ["http://[::]/", "http://[ff02::1]/", "http://224.0.0.1/"] {
+        let msg = serde_json::from_value::<mcp_guard::jsonrpc::JsonRpcMessage>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": { "uri": uri }
+        }))
+        .unwrap();
+        assert!(
+            matches!(
+                engine.evaluate_request(&msg),
+                mcp_guard::policy::Decision::Deny(_)
+            ),
+            "expected {uri} to be blocked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_proxy_exposes_health_and_prometheus_metrics() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = PolicyConfig {
+        server: "metrics-test".into(),
+        ..Default::default()
+    };
+    cfg.audit.path = dir.path().join("audit.jsonl");
+    cfg.tools.deny = vec!["forbidden".into()];
+    let ctx = GuardContext::new(&cfg).unwrap();
+
+    let _ = ctx.process_client_line(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"forbidden","arguments":{}}}"#,
+    );
+
+    let app = mcp_guard::proxy::http::build_router(ctx, "http://127.0.0.1:9".into());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let health: Value = client
+        .get(format!("http://{addr}/_mcp_guard/health"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["server"], "metrics-test");
+    assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+
+    let metrics = client
+        .get(format!("http://{addr}/_mcp_guard/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(metrics.contains("mcp_guard_requests_total{server=\"metrics-test\"} 1"));
+    assert!(metrics.contains("mcp_guard_denied_total{server=\"metrics-test\"} 1"));
+}
+
+#[test]
+fn cli_check_command_validates_policy() {
+    let dir = TempDir::new().unwrap();
+    let toml_path = dir.path().join("mcp-guard.toml");
+    std::fs::write(
+        &toml_path,
+        r#"[tools]
+allow = ["read_*"]
+deny = ["bash*"]
+[network]
+block_private_ips = true
+resolve_dns = false
+"#,
+    )
+    .unwrap();
+    let bin = env!("CARGO_BIN_EXE_mcp-guard");
+    let out = Command::new(bin)
+        .args(["check", "--policy", toml_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("OK:"));
 }

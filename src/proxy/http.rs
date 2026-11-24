@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, get};
 use axum::Router;
 use futures_util::StreamExt;
 use tokio::net::TcpListener;
@@ -39,9 +39,38 @@ pub fn build_router(ctx: GuardContext, upstream: String) -> Router {
         client: reqwest::Client::new(),
     };
     Router::new()
+        .route("/_mcp_guard/health", get(handle_health))
+        .route("/_mcp_guard/metrics", get(handle_metrics))
         .route("/", any(handle_proxy))
         .route("/{*path}", any(handle_proxy))
         .with_state(state)
+}
+
+async fn handle_health(State(state): State<HttpProxyState>) -> Response {
+    let body = serde_json::json!({
+        "status": "ok",
+        "server": state.ctx.server_name(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": state.ctx.uptime_secs(),
+    });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+async fn handle_metrics(State(state): State<HttpProxyState>) -> Response {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.ctx.render_prometheus(),
+    )
+        .into_response()
 }
 
 async fn handle_proxy(State(state): State<HttpProxyState>, req: Request) -> Response {
@@ -158,7 +187,8 @@ async fn handle_proxy(State(state): State<HttpProxyState>, req: Request) -> Resp
     };
 
     let out_bytes = if let Ok(text) = std::str::from_utf8(&resp_bytes) {
-        if text.trim_start().starts_with('{') {
+        let t = text.trim_start();
+        if t.starts_with('{') || t.starts_with('[') {
             state.ctx.process_server_line(text).into_bytes()
         } else {
             resp_bytes.to_vec()
@@ -181,7 +211,7 @@ fn sanitize_sse_chunk(ctx: &GuardContext, bytes: &[u8]) -> Vec<u8> {
     for line in text.split_inclusive('\n') {
         if let Some(payload) = line.strip_prefix("data:") {
             let trimmed = payload.trim();
-            if trimmed.starts_with('{') {
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
                 let sanitized = ctx.process_server_line(trimmed);
                 out.push_str("data: ");
                 out.push_str(&sanitized);
